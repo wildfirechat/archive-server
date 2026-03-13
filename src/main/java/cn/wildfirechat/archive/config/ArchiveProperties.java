@@ -49,7 +49,6 @@ public class ArchiveProperties {
         private String url = "jdbc:clickhouse://localhost:8123/default";
         private String username = "default";
         private String password = "";
-        private String table = "message_archive";
         private int maxBatchSize = 5000;
     }
     
@@ -109,5 +108,11 @@ public class ArchiveProperties {
          *      为避免同步时找不到对应的消息内容，需要延迟 5 分钟同步
          */
         private int syncHistoryDays = 365;
+        
+        /**
+         * 是否同步群组消息（超级群组）
+         * 默认为 false，需要手动开启
+         */
+        private boolean syncGroupEnabled = true;
     }
 }

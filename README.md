@@ -129,6 +129,12 @@ clickhouse-client -d default < src/main/resources/sql/init-clickhouse.sql
   - 包含 n-gram 布隆过滤器索引支持模糊搜索
   - ORDER BY (user_id, conv_type, conv_target, conv_line, mid)
 - `archive_progress` - 同步进度表
+- `group_message_archive` - 群组消息归档表（超级群组消息）
+  - 包含 n-gram 布隆过滤器索引支持模糊搜索
+  - ORDER BY (gid, conv_line, mid)
+  - 仅在 `sync-group-enabled: true` 时同步
+
+**注意**：表名已固定，不再支持通过配置修改。
 
 ### 3. 配置
 
@@ -156,13 +162,13 @@ archive:
     quiet-time-end: "06:00"   # 安静时间结束
     batches-per-cycle: 10     # 每轮处理的批次数
     sync-history-days: 365    # 只同步 N 天前的消息（0表示全部）
+    sync-group-enabled: false # 是否同步超级群组消息（默认关闭）
   
   # ClickHouse 配置
   clickhouse:
     url: jdbc:clickhouse://localhost:8123/default
     username: default
     password: ""
-    table: message_archive
     max-batch-size: 5000    # 单次最大写入数
   
   # MySQL 源配置
@@ -189,7 +195,6 @@ archive:
     url: jdbc:clickhouse://localhost:8123/default
     username: default
     password: ""
-    table: message_archive
 ```
 
 ### 4. 启动服务
@@ -493,11 +498,13 @@ archive.task.batches-per-cycle=10
 # 同步历史消息的天数（0表示全部）
 archive.task.sync-history-days=365
 
+# 是否同步超级群组消息（默认false）
+archive.task.sync-group-enabled=false
+
 # ========== ClickHouse 配置 ==========
 archive.clickhouse.url=jdbc:clickhouse://localhost:8123/default
 archive.clickhouse.username=default
 archive.clickhouse.password=
-archive.clickhouse.table=message_archive
 archive.clickhouse.max-batch-size=5000
 
 # ========== MySQL 源配置 ==========

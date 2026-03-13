@@ -1,6 +1,7 @@
 package cn.wildfirechat.archive.repository.source;
 
 import cn.wildfirechat.archive.config.ArchiveProperties;
+import cn.wildfirechat.archive.entity.GroupMessage;
 import cn.wildfirechat.archive.entity.Message;
 import cn.wildfirechat.archive.entity.UserMessage;
 import com.mongodb.client.MongoClient;
@@ -52,6 +53,10 @@ public class MongoMessageSource implements MessageSource {
         return getDatabase().getCollection(getUserMessageTableName(tableIndex));
     }
     
+    private MongoCollection<Document> getGroupMessageCollection(int tableIndex) {
+        return getDatabase().getCollection(getGroupMessageTableName(tableIndex));
+    }
+    
     private Message documentToMessage(Document doc) {
         if (doc == null) return null;
         Message msg = new Message();
@@ -91,6 +96,24 @@ public class MongoMessageSource implements MessageSource {
         um.setTarget(doc.getString("_target"));
         um.setContType(doc.getInteger("_cont_type", 0));
         return um;
+    }
+    
+    private GroupMessage documentToGroupMessage(Document doc) {
+        if (doc == null) return null;
+        GroupMessage gm = new GroupMessage();
+        gm.setMid(doc.getLong("_mid"));
+        gm.setSender(doc.getString("_sender"));
+        gm.setGid(doc.getString("_gid"));
+        gm.setLine(doc.getInteger("_line", 0));
+        gm.setContType(doc.getInteger("_cont_type", 0));
+        
+        // _dt 在 MongoDB 中存储为 Date 类型，需要转换为毫秒时间戳
+        Date dt = doc.getDate("_dt");
+        if (dt != null) {
+            gm.setDt(dt.getTime());
+        }
+        
+        return gm;
     }
 
     @Override
@@ -190,12 +213,7 @@ public class MongoMessageSource implements MessageSource {
     private String getUserMessageTableName(int tableIndex) {
         return String.format("t_user_messages_%d", tableIndex);
     }
-    
-    @Override
-    public List<UserMessage> fetchUserMessagesByMidRange(int tableIndex, Long startMid, int limit) {
-        return fetchUserMessagesByMidRange(tableIndex, startMid, limit, null, null);
-    }
-    
+
     @Override
     public List<UserMessage> fetchUserMessagesByMidRange(int tableIndex, Long startMid, int limit, LocalDateTime startTime, LocalDateTime endTime) {
         List<UserMessage> userMessages = new ArrayList<>();
@@ -235,6 +253,77 @@ public class MongoMessageSource implements MessageSource {
             }
         } catch (Exception e) {
             log.error("Failed to get max mid from user table {}: {}", tableIndex, e.getMessage());
+        }
+        return 0L;
+    }
+    
+    // ==================== 群组消息相关实现 ====================
+    
+    private static final int GROUP_MESSAGE_TABLE_COUNT = 128;
+    
+    @Override
+    public int getGroupMessageTableCount() {
+        return GROUP_MESSAGE_TABLE_COUNT;
+    }
+    
+    @Override
+    public String getGroupMessageTableName(int tableIndex) {
+        return String.format("t_group_messages_%d", tableIndex);
+    }
+    
+    @Override
+    public int getGroupMessageTableIndex(String gid) {
+        int hash = gid.hashCode() % GROUP_MESSAGE_TABLE_COUNT;
+        return Math.abs(hash) % GROUP_MESSAGE_TABLE_COUNT;
+    }
+
+    @Override
+    public List<GroupMessage> fetchGroupMessagesByMidRange(int tableIndex, Long startMid, int limit, 
+                                                           long startTime, long endTime) {
+        List<GroupMessage> groupMessages = new ArrayList<>();
+        try {
+            // 构建查询条件
+            List<org.bson.conversions.Bson> filters = new ArrayList<>();
+            filters.add(Filters.gt("_mid", startMid));
+            
+            // 添加时间筛选条件（输入的 LocalDateTime 是 UTC 时间，转换为毫秒时间戳）
+            if (startTime > 0) {
+                filters.add(Filters.gte("_dt", new Date(startTime)));
+            }
+            if (endTime > 0) {
+                filters.add(Filters.lte("_dt", new Date(endTime)));
+            }
+            
+            // 只查询需要的字段，避免加载不必要的数据
+            Bson projection = fields(
+                excludeId(),
+                include("_mid", "_sender", "_gid", "_line", "_cont_type", "_dt")
+            );
+            
+            getGroupMessageCollection(tableIndex)
+                .find(Filters.and(filters))
+                .projection(projection)
+                .sort(new Document("_mid", 1))
+                .limit(limit)
+                .forEach(doc -> groupMessages.add(documentToGroupMessage(doc)));
+        } catch (Exception e) {
+            log.error("Failed to fetch group messages from table {}: {}", tableIndex, e.getMessage());
+        }
+        return groupMessages;
+    }
+    
+    @Override
+    public Long getGroupTableMaxMid(int tableIndex) {
+        try {
+            Document doc = getGroupMessageCollection(tableIndex)
+                .find()
+                .sort(new Document("_mid", -1))
+                .first();
+            if (doc != null && doc.getLong("_mid") != null) {
+                return doc.getLong("_mid");
+            }
+        } catch (Exception e) {
+            log.error("Failed to get max mid from group table {}: {}", tableIndex, e.getMessage());
         }
         return 0L;
     }

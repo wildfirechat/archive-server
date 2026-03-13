@@ -881,3 +881,136 @@ const localTime = new Date(message.messageDt + 'Z').toLocaleString();
 
 4. 客户端展示搜索结果
 ```
+
+---
+
+## 6. 群组消息接口（超级群组）
+
+> 注意：群组消息归档功能需要在配置中开启 `archive.task.sync-group-enabled=true`
+> 
+> **说明**：群组消息接口完全复用普通消息的 Request/Response 数据结构，查询的是独立的 `group_message_archive` 表。
+
+### 6.1 获取群组消息列表
+
+获取某个群组的历史消息列表。
+
+#### 请求
+
+```http
+POST /api/group-messages/fetch
+```
+
+#### 请求参数
+
+复用 `FetchRequest`，字段说明：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| convType | int | 否 | 1 | 固定为1（群组），可不传 |
+| convTarget | string | **是** | - | 群组ID |
+| convLine | int | 否 | 0 | 会话线路 |
+| contentType | int | 否 | - | 消息内容类型筛选 |
+| startMid | long | 否 | - | 起始消息ID（用于翻页） |
+| before | boolean | 否 | true | true=查询更早的消息，false=查询更新的消息 |
+| limit | int | 否 | 20 | 返回条数，最大100 |
+
+#### 请求示例
+
+**查询某个群组的最新消息（第一页）：**
+
+```json
+{
+  "convTarget": "group123",
+  "limit": 20
+}
+```
+
+**翻页查询更早的消息：**
+
+```json
+{
+  "convTarget": "group123",
+  "startMid": 123456789,
+  "before": true,
+  "limit": 20
+}
+```
+
+#### 响应参数
+
+复用 `MessageFetchResponse`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| messages | array | 群组消息列表（数据结构同普通消息） |
+| hasMore | boolean | 是否还有更多消息 |
+| nextStartMid | long | 下一页起始消息ID |
+
+#### 群组消息结构
+
+> **说明**：群组消息响应复用普通消息的数据结构 `ArchivedMessageDTO`，其中：
+> - `convType` 固定为 `1`（表示群组会话）
+> - `convTarget` 为群组ID
+> - `userId` 与 `senderId` 相同
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| mid | long | 消息唯一ID |
+| senderId | string | 发送者用户ID |
+| convType | int | 会话类型，固定为 `1`（群组） |
+| convTarget | string | 会话目标，即群组ID |
+| convLine | int | 会话线路 |
+| contentType | int | 消息内容类型 |
+| payload | object | 消息内容（解析后的 MessagePayload） |
+| userId | string | 当前用户ID（与发送者相同） |
+| searchableKey | string | 可搜索文本 |
+| messageDt | string | 消息发送时间（ISO 8601格式，UTC时间） |
+
+### 6.2 搜索群组消息
+
+根据关键字搜索群组消息内容。
+
+#### 请求
+
+```http
+POST /api/group-messages/search
+```
+
+#### 请求参数
+
+复用 `SearchRequest`，字段说明：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| keyword | string | **是** | - | 搜索关键字 |
+| convTarget | string | 否 | - | 群组ID（不提供则搜索所有群组） |
+| convLine | int | 否 | - | 会话线路筛选 |
+| contentType | int | 否 | - | 内容类型筛选 |
+| startMid | long | 否 | - | 起始消息ID |
+| before | boolean | 否 | true | 翻页方向 |
+| limit | int | 否 | 20 | 返回条数，最大100 |
+
+#### 请求示例
+
+**在指定群组中搜索：**
+
+```json
+{
+  "convTarget": "group123",
+  "keyword": "项目进度",
+  "limit": 20
+}
+```
+
+**搜索所有群组：**
+
+```json
+{
+  "keyword": "重要通知",
+  "limit": 20
+}
+```
+
+#### 响应参数
+
+复用 `MessageFetchResponse`，与 `/api/group-messages/fetch` 相同。

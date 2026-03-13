@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS message_archive (
     conv_line UInt32,
     content_type UInt32,
     content_data String,
-    searchable_key Nullable(String),
+    searchable_key String DEFAULT '',
     user_id String,
     message_dt DateTime64(3),
     user_hash UInt8,
@@ -167,7 +167,7 @@ ORDER BY (user_id, conv_type, conv_target, conv_line, mid);
 | conv_line | UInt32 | 会话线路（默认0） |
 | content_type | UInt32 | 消息内容类型 |
 | content_data | String | 消息内容（Base64编码） |
-| searchable_key | Nullable(String) | 可搜索关键字 |
+| searchable_key | String | 可搜索关键字（空字符串表示无） |
 | user_id | String | 当前用户ID（用户视角） |
 | message_dt | DateTime64(3) | 消息发送时间 |
 | user_hash | UInt8 | user_id.hashCode() % 128，用于分区 |
@@ -207,6 +207,54 @@ ORDER BY table_name;
 **设计说明：**
 - 每个用户消息表（共128个）在进度表中有一条记录
 - 使用 `ReplacingMergeTree(updated_at)` 自动合并，保留最新记录
+
+### 2.3 group_message_archive（群组消息归档表）
+
+```sql
+CREATE TABLE IF NOT EXISTS group_message_archive (
+    mid UInt64,
+    sender_id String,
+    gid String,
+    conv_line UInt32,
+    content_type UInt32,
+    content_data String,
+    searchable_key String DEFAULT '',
+    message_dt DateTime64(3),
+    group_hash UInt8,
+    _version UInt64 DEFAULT toUnixTimestamp64Milli(now64()),
+    INDEX idx_searchable_key searchable_key TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 4
+) ENGINE = ReplacingMergeTree(_version)
+PARTITION BY group_hash
+ORDER BY (gid, conv_line, mid);
+```
+
+**字段说明：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| mid | UInt64 | 消息ID |
+| sender_id | String | 发送者ID |
+| gid | String | 群组ID |
+| conv_line | UInt32 | 会话线路（默认0） |
+| content_type | UInt32 | 消息内容类型 |
+| content_data | String | 消息内容（Base64编码） |
+| searchable_key | String | 可搜索关键字（空字符串表示无） |
+| message_dt | DateTime64(3) | 消息发送时间 |
+| group_hash | UInt8 | gid.hashCode() % 128，用于分区 |
+| _version | UInt64 | 版本号（毫秒时间戳），用于去重 |
+
+**索引说明：**
+
+| 索引 | 类型 | 说明 |
+|------|------|------|
+| idx_searchable_key | tokenbf_v1(32768, 3, 0) | n-gram 布隆过滤器，支持模糊搜索 |
+
+**设计说明：**
+- **分区策略**：`PARTITION BY group_hash`，128个分区，与源表 `t_group_messages_N` 保持一致
+- **排序键**：`ORDER BY (gid, conv_line, mid)`，优化按群组+消息ID的查询
+- **去重策略**：`ReplacingMergeTree(_version)`，相同主键保留 version 最大的记录
+- **搜索优化**：n-gram 布隆过滤器索引，配合 Java 层二次过滤实现模糊搜索
+- **开启条件**：需要在配置中设置 `archive.task.sync-group-enabled=true`
 
 ---
 
@@ -584,6 +632,7 @@ ORDER BY table_name;
 │  │ - batchesPerCycle: int      │  // 每轮批次数               │
 │  │ - shutdownTimeoutSec: int   │                               │
 │  │ - syncHistoryDays: int      │  // 同步历史天数             │
+│  │ - syncGroupEnabled: boolean │  // 同步群组消息开关         │
 │  └─────────────────────────────┘                               │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘

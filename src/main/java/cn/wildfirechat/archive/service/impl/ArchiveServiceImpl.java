@@ -1,7 +1,9 @@
 package cn.wildfirechat.archive.service.impl;
 
 import cn.wildfirechat.archive.config.ArchiveProperties;
+import cn.wildfirechat.archive.entity.ArchivedGroupMessage;
 import cn.wildfirechat.archive.entity.ArchivedMessage;
+import cn.wildfirechat.archive.entity.GroupMessage;
 import cn.wildfirechat.archive.entity.Message;
 import cn.wildfirechat.archive.entity.UserMessage;
 import cn.wildfirechat.archive.metrics.ArchiveMetrics;
@@ -65,6 +67,10 @@ public class ArchiveServiceImpl implements ArchiveService {
     // 缺失消息统计（用于监控）
     private final LongAdder missingMessageCount = new LongAdder();
     private final Set<Long> recentMissingMids = ConcurrentHashMap.newKeySet();
+    
+    // 群组消息缺失统计
+    private final LongAdder missingGroupMessageCount = new LongAdder();
+    private final Set<Long> recentMissingGroupMids = ConcurrentHashMap.newKeySet();
     
     // 重试配置
     private static final int MAX_RETRIES = 3;
@@ -275,6 +281,7 @@ public class ArchiveServiceImpl implements ArchiveService {
         int batchIntervalMs = archiveProperties.getTask().getBatchIntervalMs();
         int batchesPerCycle = archiveProperties.getTask().getBatchesPerCycle();
         int syncHistoryDays = archiveProperties.getTask().getSyncHistoryDays();
+        boolean syncGroupEnabled = archiveProperties.getTask().isSyncGroupEnabled();
         
         boolean isQuietTime = isQuietTime();
 
@@ -284,10 +291,11 @@ public class ArchiveServiceImpl implements ArchiveService {
         }
         
         if (syncHistoryDays > 0) {
-            log.info("Starting archive cycle (sync messages older than {} days, quiet time: {})...", 
-                syncHistoryDays, isQuietTime);
+            log.info("Starting archive cycle (sync messages older than {} days, quiet time: {}, group sync: {})...", 
+                syncHistoryDays, isQuietTime, syncGroupEnabled);
         } else {
-            log.info("Starting archive cycle (sync all messages, quiet time: {})...", isQuietTime);
+            log.info("Starting archive cycle (sync all messages, quiet time: {}, group sync: {})...", 
+                isQuietTime, syncGroupEnabled);
         }
 
         int cyclesToRun = batchesPerCycle;
@@ -303,6 +311,7 @@ public class ArchiveServiceImpl implements ArchiveService {
                 log.debug("Running batch {} of {}", cycle + 1, cyclesToRun);
             }
             
+            // 1. 同步普通消息（用户消息表）
             for (int tableIndex = 0; tableIndex < 128; tableIndex++) {
                 if (shuttingDown.get()) {
                     log.info("Shutting down, stopping cycle at table {}", tableIndex);
@@ -335,6 +344,44 @@ public class ArchiveServiceImpl implements ArchiveService {
                     }
                 } catch (Exception e) {
                     log.error("Error processing table {}: {}", tableName, e.getMessage());
+                }
+            }
+            
+            // 2. 同步群组消息（如果启用）
+            if (syncGroupEnabled) {
+                for (int tableIndex = 0; tableIndex < 128; tableIndex++) {
+                    if (shuttingDown.get()) {
+                        log.info("Shutting down, stopping group cycle at table {}", tableIndex);
+                        break;
+                    }
+
+                    try {
+                        log.debug("Waiting {} ms before next group batch...", cycleIntervalMs);
+                        Thread.sleep(cycleIntervalMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+
+                    if (shuttingDown.get()) {
+                        log.info("Shutting down, stopping group cycle at table {}", tableIndex);
+                        break;
+                    }
+                    
+                    String tableName = "t_group_messages_" + tableIndex;
+                    log.debug("Processing group table: {}", tableName);
+                    
+                    try {
+                        GroupBatchResult result = doGroupArchiveBatchWithRetry(tableName, tableIndex, batchSize);
+                        if (result.processedCount > 0) {
+                            log.info("Group table {} processed {} messages", tableName, result.processedCount);
+                        }
+                        if (result.hasMore) {
+                            anyHasMore = true;
+                        }
+                    } catch (Exception e) {
+                        log.error("Error processing group table {}: {}", tableName, e.getMessage());
+                    }
                 }
             }
         }
@@ -384,6 +431,18 @@ public class ArchiveServiceImpl implements ArchiveService {
         final int missingCount;  // 新增：记录缺失消息数
         
         BatchResult(boolean hasMore, int processedCount, int missingCount) {
+            this.hasMore = hasMore;
+            this.processedCount = processedCount;
+            this.missingCount = missingCount;
+        }
+    }
+    
+    private static class GroupBatchResult {
+        final boolean hasMore;
+        final int processedCount;
+        final int missingCount;
+        
+        GroupBatchResult(boolean hasMore, int processedCount, int missingCount) {
             this.hasMore = hasMore;
             this.processedCount = processedCount;
             this.missingCount = missingCount;
@@ -487,14 +546,14 @@ public class ArchiveServiceImpl implements ArchiveService {
         // 获取最晚允许同步的时间（N天前）
         // 使用 UTC 时间，与 messageDt 存储时区保持一致
         long maxTimestamp = getMaxMessageTimestamp();
-        LocalDateTime endTime = maxTimestamp < Long.MAX_VALUE 
+        LocalDateTime endTime = maxTimestamp < Long.MAX_VALUE
             ? LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(maxTimestamp), ZoneId.of("UTC"))
             : null;
         if (maxTimestamp < Long.MAX_VALUE) {
-            log.debug("Sync history limit: {} days before, endTime(UTC): {}", 
+            log.debug("Sync history limit: {} days before, endTime(UTC): {}",
                 archiveProperties.getTask().getSyncHistoryDays(), endTime);
         }
-        
+
         // 读取用户消息（带时间筛选）
         List<UserMessage> userMessages = messageSource.fetchUserMessagesByMidRange(tableIndex, lastMid, batchSize, null, endTime);
         
@@ -527,7 +586,7 @@ public class ArchiveServiceImpl implements ArchiveService {
         boolean writeSuccess = false;
         if (!archivedMessages.isEmpty()) {
             try {
-                archiveRepository.batchInsert(archivedMessages);
+                archiveRepository.batchInsertMessages(archivedMessages);
                 writeSuccess = true;
                 
                 // 记录延迟
@@ -667,7 +726,7 @@ public class ArchiveServiceImpl implements ArchiveService {
         am.setConvLine(um.getLine());
         am.setContentType(um.getContType());
         am.setContentData(msg.getData() != null ? Base64.getEncoder().encodeToString(msg.getData()) : null);
-        am.setSearchableKey(msg.getSearchableKey());
+        am.setSearchableKey(msg.getSearchableKey() != null ? msg.getSearchableKey() : "");
         am.setUserId(um.getUid());
         am.setMessageDt(msg.getDt());
         am.setUserHash(calculateUserHash(um.getUid()));  // 使用修复后的方法
@@ -733,6 +792,181 @@ public class ArchiveServiceImpl implements ArchiveService {
         status.put("metrics", metrics.getStatusSummary());
         status.put("missingMessageCount", missingMessageCount.sum());
         status.put("recentMissingMids", new ArrayList<>(recentMissingMids));
+        status.put("missingGroupMessageCount", missingGroupMessageCount.sum());
+        status.put("recentMissingGroupMids", new ArrayList<>(recentMissingGroupMids));
+        status.put("syncGroupEnabled", archiveProperties.getTask().isSyncGroupEnabled());
         return status;
+    }
+    
+    // ==================== 群组消息同步相关方法 ====================
+    
+    /**
+     * 带重试的群组消息批次处理
+     */
+    private GroupBatchResult doGroupArchiveBatchWithRetry(String tableName, int tableIndex, int batchSize) {
+        int retryCount = 0;
+        Exception lastException = null;
+        
+        while (retryCount < MAX_RETRIES) {
+            try {
+                return doGroupArchiveBatch(tableName, tableIndex, batchSize);
+            } catch (Exception e) {
+                lastException = e;
+                retryCount++;
+                
+                if (isRetryableException(e) && retryCount < MAX_RETRIES) {
+                    log.warn("Group batch processing failed for table {}, retrying {}/{}: {}", 
+                        tableName, retryCount, MAX_RETRIES, e.getMessage());
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS * retryCount);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        log.error("Group batch processing failed for table {} after {} retries: {}", 
+            tableName, MAX_RETRIES, lastException != null ? lastException.getMessage() : "Unknown error");
+        metrics.recordMessagesFailed(batchSize);
+        return new GroupBatchResult(false, 0, 0);
+    }
+    
+    /**
+     * 处理单个群组消息表的一个批次
+     */
+    private GroupBatchResult doGroupArchiveBatch(String tableName, int tableIndex, int batchSize) throws Exception {
+        int processedCount = 0;
+        int missingCount = 0;
+        
+        // 获取最后同步的mid
+        Long lastMid = getLastMid(tableName);
+        
+        // 获取最晚允许同步的时间
+        long maxTimestamp = getMaxMessageTimestamp();
+        LocalDateTime endTime = maxTimestamp < Long.MAX_VALUE 
+            ? LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(maxTimestamp), ZoneId.of("UTC"))
+            : null;
+        
+        // 读取群组消息
+        List<GroupMessage> groupMessages = messageSource.fetchGroupMessagesByMidRange(tableIndex, lastMid, batchSize, 0, maxTimestamp);
+        
+        if (groupMessages.isEmpty()) {
+            return new GroupBatchResult(false, 0, 0);
+        }
+        
+        // 批量查询消息内容
+        List<Long> mids = groupMessages.stream()
+            .map(GroupMessage::getMid)
+            .distinct()
+            .collect(java.util.stream.Collectors.toList());
+        
+        Map<Long, Message> messageMap = fetchMessagesWithRetry(mids);
+        
+        // 合并为宽表记录
+        List<ArchivedGroupMessage> archivedMessages = new ArrayList<>();
+        for (GroupMessage gm : groupMessages) {
+            Message msg = messageMap.get(gm.getMid());
+            // msg id为null时是有效的，-1为无效的
+            if (msg != null && msg.getId() == null) {
+                archivedMessages.add(convertToArchivedGroupMessage(msg, gm));
+            } else {
+                missingCount++;
+                recordMissingGroupMessage(gm.getMid());
+            }
+        }
+        
+        // 写入 ClickHouse
+        boolean writeSuccess = false;
+        if (!archivedMessages.isEmpty()) {
+            try {
+                archiveRepository.batchInsertGroupMessages(archivedMessages);
+                writeSuccess = true;
+                
+                // 记录延迟
+                try {
+                    ArchivedGroupMessage lastMsg = archivedMessages.get(archivedMessages.size() - 1);
+                    long msgTime = lastMsg.getMessageDt()
+                        .atZone(ZoneId.of("UTC"))
+                        .toInstant()
+                        .toEpochMilli();
+                    long lag = System.currentTimeMillis() - msgTime;
+                    if (lag >= 0) {
+                        metrics.recordProcessingLag(lag);
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to record group processing lag: {}", e.getMessage());
+                }
+            } catch (Exception e) {
+                log.error("Failed to write group batch to ClickHouse: {}", e.getMessage());
+                throw e;
+            }
+        } else {
+            writeSuccess = true;
+        }
+        
+        // 更新进度
+        if (writeSuccess) {
+            GroupMessage last = groupMessages.get(groupMessages.size() - 1);
+            updateProgress(tableName, last.getMid());
+        }
+        
+        processedCount = archivedMessages.size();
+        
+        // 记录缺失消息
+        if (missingCount > 0) {
+            missingGroupMessageCount.add(missingCount);
+            log.warn("Group table {} has {} messages with missing content (out of {})", 
+                tableName, missingCount, groupMessages.size());
+        }
+        
+        return new GroupBatchResult(groupMessages.size() >= batchSize, processedCount, missingCount);
+    }
+    
+    /**
+     * 记录缺失的群组消息ID
+     */
+    private void recordMissingGroupMessage(Long mid) {
+        recentMissingGroupMids.add(mid);
+        if (recentMissingGroupMids.size() > 10000) {
+            Iterator<Long> it = recentMissingGroupMids.iterator();
+            for (int i = 0; i < 1000 && it.hasNext(); i++) {
+                it.next();
+                it.remove();
+            }
+        }
+    }
+    
+    /**
+     * 计算 groupHash，避免 Integer.MIN_VALUE 的 abs 问题
+     */
+    private int calculateGroupHash(String gid) {
+        if (gid == null) {
+            return 0;
+        }
+        int hash = gid.hashCode() % 128;
+        return Math.abs(hash) % 128;
+    }
+    
+    /**
+     * 将 GroupMessage 和 Message 合并为 ArchivedGroupMessage
+     */
+    private ArchivedGroupMessage convertToArchivedGroupMessage(Message msg, GroupMessage gm) {
+        ArchivedGroupMessage am = new ArchivedGroupMessage();
+        am.setMid(gm.getMid());
+        am.setSenderId(gm.getSender());
+        am.setGid(gm.getGid());
+        am.setConvLine(gm.getLine());
+        am.setContentType(gm.getContType());
+        am.setContentData(msg.getData() != null ? 
+            Base64.getEncoder().encodeToString(msg.getData()) : null);
+        am.setSearchableKey(msg.getSearchableKey() != null ? msg.getSearchableKey() : "");
+        // 将毫秒时间戳转为 LocalDateTime
+        am.setMessageDt(msg.getDt());
+        am.setGroupHash(calculateGroupHash(gm.getGid()));
+        return am;
     }
 }

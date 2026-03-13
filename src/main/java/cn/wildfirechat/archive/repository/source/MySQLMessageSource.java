@@ -1,5 +1,6 @@
 package cn.wildfirechat.archive.repository.source;
 
+import cn.wildfirechat.archive.entity.GroupMessage;
 import cn.wildfirechat.archive.entity.Message;
 import cn.wildfirechat.archive.entity.UserMessage;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +27,7 @@ public class MySQLMessageSource implements MessageSource {
     
     private static final int MESSAGE_TABLE_COUNT = 36;
     private static final int USER_MESSAGE_TABLE_COUNT = 128;
+    private static final int GROUP_MESSAGE_TABLE_COUNT = 128;
     
     private final JdbcTemplate jdbcTemplate;
     
@@ -55,6 +57,17 @@ public class MySQLMessageSource implements MessageSource {
         um.setTarget(rs.getString("_target"));
         um.setContType(rs.getInt("_cont_type"));
         return um;
+    };
+    
+    private final RowMapper<GroupMessage> groupMessageRowMapper = (rs, rowNum) -> {
+        GroupMessage gm = new GroupMessage();
+        gm.setMid(rs.getLong("_mid"));
+        gm.setSender(rs.getString("_sender"));
+        gm.setGid(rs.getString("_gid"));
+        gm.setLine(rs.getInt("_line"));
+        gm.setContType(rs.getInt("_cont_type"));
+        gm.setDt(rs.getLong("_dt"));
+        return gm;
     };
     
     @Override
@@ -146,11 +159,6 @@ public class MySQLMessageSource implements MessageSource {
     }
     
     @Override
-    public List<UserMessage> fetchUserMessagesByMidRange(int tableIndex, Long startMid, int limit) {
-        return fetchUserMessagesByMidRange(tableIndex, startMid, limit, null, null);
-    }
-    
-    @Override
     public List<UserMessage> fetchUserMessagesByMidRange(int tableIndex, Long startMid, int limit, LocalDateTime startTime, LocalDateTime endTime) {
         String tableName = getUserMessageTableName(tableIndex);
         StringBuilder sqlBuilder = new StringBuilder();
@@ -183,6 +191,72 @@ public class MySQLMessageSource implements MessageSource {
     @Override
     public Long getUserTableMaxMid(int tableIndex) {
         String tableName = getUserMessageTableName(tableIndex);
+        String sql = String.format("SELECT MAX(_mid) FROM %s", tableName);
+        try {
+            Long maxMid = jdbcTemplate.queryForObject(sql, Long.class);
+            return maxMid != null ? maxMid : 0L;
+        } catch (Exception e) {
+            log.error("Failed to get max mid from {}: {}", tableName, e.getMessage());
+            return 0L;
+        }
+    }
+    
+    // ==================== 群组消息相关实现 ====================
+    
+    @Override
+    public int getGroupMessageTableCount() {
+        return GROUP_MESSAGE_TABLE_COUNT;
+    }
+    
+    @Override
+    public String getGroupMessageTableName(int tableIndex) {
+        return String.format("t_group_messages_%d", tableIndex);
+    }
+    
+    @Override
+    public int getGroupMessageTableIndex(String gid) {
+        // 使用 gid 的 hashCode 的绝对值再取模
+        int hash = gid.hashCode() % GROUP_MESSAGE_TABLE_COUNT;
+        return Math.abs(hash) % GROUP_MESSAGE_TABLE_COUNT;
+    }
+    
+    @Override
+    public List<GroupMessage> fetchGroupMessagesByMidRange(int tableIndex, Long startMid, int limit, 
+                                                           long startTime, long endTime) {
+        String tableName = getGroupMessageTableName(tableIndex);
+        StringBuilder sqlBuilder = new StringBuilder();
+        // 只查询需要的字段，避免加载不必要的数据
+        sqlBuilder.append(String.format(
+            "SELECT _mid, _sender, _gid, _line, _cont_type, _dt " +
+            "FROM %s WHERE _mid > ?", tableName));
+        
+        List<Object> params = new ArrayList<>();
+        params.add(startMid);
+        
+        // 添加时间筛选条件
+        if (startTime > 0) {
+            sqlBuilder.append(" AND _dt >= ?");
+            params.add(endTime);
+        }
+        if (endTime > 0) {
+            sqlBuilder.append(" AND _dt <= ?");
+            params.add(endTime);
+        }
+        
+        sqlBuilder.append(" ORDER BY _mid ASC LIMIT ?");
+        params.add(limit);
+        
+        try {
+            return jdbcTemplate.query(sqlBuilder.toString(), groupMessageRowMapper, params.toArray());
+        } catch (Exception e) {
+            log.error("Failed to fetch group messages from {}: {}", tableName, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+    
+    @Override
+    public Long getGroupTableMaxMid(int tableIndex) {
+        String tableName = getGroupMessageTableName(tableIndex);
         String sql = String.format("SELECT MAX(_mid) FROM %s", tableName);
         try {
             Long maxMid = jdbcTemplate.queryForObject(sql, Long.class);
