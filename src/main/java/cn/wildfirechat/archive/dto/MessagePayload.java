@@ -57,21 +57,9 @@ public class MessagePayload {
      * 媒体消息相关字段（图片、语音、文件、视频等）
      */
     private String remoteMediaUrl;
-    private String localMediaPath;
-    private String mediaName;
-    private Long mediaSize;
-    private Integer mediaWidth;
-    private Integer mediaHeight;
-    private String mediaThumbUrl;
-    private String mediaThumbPath;
-    
+
     /**
-     * 消息额外数据（JSON格式，根据消息类型不同而不同）
+     * 附加信息
      */
     private String extra;
-    
-    /**
-     * 消息子类型（部分消息类型使用）
-     */
-    private Integer subType;
 }
