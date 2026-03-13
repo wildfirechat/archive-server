@@ -13,9 +13,16 @@ import java.util.List;
 public interface MessageSource {
 
     /**
-     * 根据mid列表获取消息
+     * 根据mid获取单条消息（建议使用批量方法以获得更好性能）
      */
     Message fetchMessagesByMids(int tableIndex, long mid);
+    
+    /**
+     * 批量根据mid列表获取消息
+     * @param mids 消息ID列表
+     * @return 消息列表（不保证顺序，找不到的消息会被跳过）
+     */
+    List<Message> fetchMessagesByMids(List<Long> mids);
     
     /**
      * 根据mid获取用户消息关联

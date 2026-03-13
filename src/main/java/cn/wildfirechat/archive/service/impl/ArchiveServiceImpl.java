@@ -633,6 +633,7 @@ public class ArchiveServiceImpl implements ArchiveService {
     
     /**
      * 批量获取消息内容，带重试机制
+     * 优化：使用批量查询代替逐条查询，大幅减少数据库访问次数
      * 注意：返回的 Map 中，如果消息不存在，不会包含该 mid（即跳过空消息）
      */
     private Map<Long, Message> fetchMessagesWithRetry(List<Long> mids) throws Exception {
@@ -641,20 +642,47 @@ public class ArchiveServiceImpl implements ArchiveService {
         
         int retryCount = 0;
         while (!pendingMids.isEmpty() && retryCount < MAX_RETRIES) {
-            Map<Long, Message> batchResult = new HashMap<>();
+            // 先检查缓存
+            Map<Long, Message> cacheHit = new HashMap<>();
+            List<Long> cacheMiss = new ArrayList<>();
             
-            // 批量查询，而不是逐个查询
             for (Long mid : pendingMids) {
-                Message msg = messageCache.get(mid);
-                if (msg != null) {
-                    batchResult.put(mid, msg);
+                Message msg = messageCache.getIfPresent(mid);
+                if (msg != null && msg.getMid() != -1) {
+                    cacheHit.put(mid, msg);
+                } else {
+                    cacheMiss.add(mid);
                 }
             }
             
-            result.putAll(batchResult);
+            result.putAll(cacheHit);
             
-            // 检查还有哪些消息未获取到（不包括已确认不存在的消息）
-            pendingMids.removeAll(batchResult.keySet());
+            // 缓存未命中的，批量从数据库查询（而不是逐条查询）
+            if (!cacheMiss.isEmpty()) {
+                log.debug("Cache miss for {} messages, batch fetching from database", cacheMiss.size());
+                List<Message> batchMessages = messageSource.fetchMessagesByMids(cacheMiss);
+                
+                // 将查询结果放入缓存和结果集
+                for (Message msg : batchMessages) {
+                    if (msg != null && msg.getMid() != null) {
+                        messageCache.put(msg.getMid(), msg);
+                        result.put(msg.getMid(), msg);
+                    }
+                }
+                
+                // 记录未找到的消息（用于缓存空值防穿透）
+                Set<Long> foundMids = batchMessages.stream()
+                    .map(Message::getMid)
+                    .collect(java.util.stream.Collectors.toSet());
+                for (Long mid : cacheMiss) {
+                    if (!foundMids.contains(mid)) {
+                        messageCache.put(mid, createEmptyMessage()); // 缓存空值防穿透
+                    }
+                }
+            }
+            
+            // 检查还有哪些消息未获取到
+            pendingMids.removeAll(result.keySet());
             
             if (!pendingMids.isEmpty() && retryCount < MAX_RETRIES - 1) {
                 retryCount++;

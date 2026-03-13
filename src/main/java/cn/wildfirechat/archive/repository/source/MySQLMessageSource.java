@@ -17,7 +17,9 @@ import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Repository
@@ -38,6 +40,7 @@ public class MySQLMessageSource implements MessageSource {
     
     private final RowMapper<Message> messageRowMapper = (rs, rowNum) -> {
         Message msg = new Message();
+        msg.setMid(rs.getLong("_mid"));
         msg.setFrom(rs.getString("_from"));
         msg.setData(rs.getBytes("_data"));
         msg.setSearchableKey(rs.getString("_searchable_key"));
@@ -74,7 +77,7 @@ public class MySQLMessageSource implements MessageSource {
     public Message fetchMessagesByMids(int tableIndex, long mid) {
         String tableName = getMessageTableName(tableIndex);
         // mid 是 long 基本类型，不存在 SQL 注入风险
-        String sql = String.format("SELECT _from, _data, _searchable_key, _dt FROM %s WHERE _mid = %d ORDER BY _dt DESC, id DESC LIMIT 1", tableName, mid);
+        String sql = String.format("SELECT _mid, _from, _data, _searchable_key, _dt FROM %s WHERE _mid = %d ORDER BY _dt DESC, id DESC LIMIT 1", tableName, mid);
         try {
             List<Message> messages = jdbcTemplate.query(sql, messageRowMapper);
             if(messages.isEmpty()) {
@@ -86,6 +89,52 @@ public class MySQLMessageSource implements MessageSource {
             log.error("Failed to fetch messages by mids from {}: {}", tableName, e.getMessage());
             return null;
         }
+    }
+    
+    @Override
+    public List<Message> fetchMessagesByMids(List<Long> mids) {
+        if (mids == null || mids.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        // 按表索引分组，减少查询次数
+        Map<Integer, List<Long>> tableIndexToMids = new HashMap<>();
+        for (Long mid : mids) {
+            if (mid != null && mid > 0) {
+                int tableIndex = getTableIndexByMid(mid);
+                tableIndexToMids.computeIfAbsent(tableIndex, k -> new ArrayList<>()).add(mid);
+            }
+        }
+        
+        List<Message> result = new ArrayList<>();
+        
+        // 对每个表进行一次批量查询
+        for (Map.Entry<Integer, List<Long>> entry : tableIndexToMids.entrySet()) {
+            int tableIndex = entry.getKey();
+            List<Long> tableMids = entry.getValue();
+            
+            String tableName = getMessageTableName(tableIndex);
+            String inClause = String.join(",", java.util.Collections.nCopies(tableMids.size(), "?"));
+            // 使用 IN 查询批量获取，同时处理 _mid 重复的情况（取最新的）
+            String sql = String.format(
+                "SELECT _mid, _from, _data, _searchable_key, _dt FROM %s WHERE _mid IN (%s) " +
+                "ORDER BY _dt DESC, id DESC", tableName, inClause);
+            
+            try {
+                List<Message> messages = jdbcTemplate.query(sql, messageRowMapper, tableMids.toArray());
+                // 去重：同一个 mid 可能有多条记录（由于 ORDER BY _dt DESC, id DESC，第一条是最新的）
+                java.util.Set<Long> seenMids = new java.util.HashSet<>();
+                for (Message msg : messages) {
+                    if (seenMids.add(msg.getMid())) {
+                        result.add(msg);
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Failed to batch fetch messages from {}: {}", tableName, e.getMessage());
+            }
+        }
+        
+        return result;
     }
     
     @Override

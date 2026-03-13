@@ -60,6 +60,7 @@ public class MongoMessageSource implements MessageSource {
     private Message documentToMessage(Document doc) {
         if (doc == null) return null;
         Message msg = new Message();
+        msg.setMid(doc.getLong("_id")); // MongoDB 使用 _id 存储 mid
         msg.setFrom(doc.getString("_from"));
 
         Object dataObj = doc.get("_data");
@@ -138,6 +139,50 @@ public class MongoMessageSource implements MessageSource {
             log.info("未找到ID为 {} 的消息文档", mid);
             return null;
         }
+    }
+    
+    @Override
+    public List<Message> fetchMessagesByMids(List<Long> mids) {
+        if (mids == null || mids.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        List<Message> result = new ArrayList<>();
+        
+        // 按表索引分组，减少查询次数
+        Map<Integer, List<Long>> tableIndexToMids = new HashMap<>();
+        for (Long mid : mids) {
+            if (mid != null && mid > 0) {
+                int tableIndex = getTableIndexByMid(mid);
+                tableIndexToMids.computeIfAbsent(tableIndex, k -> new ArrayList<>()).add(mid);
+            }
+        }
+        
+        // 对每个表进行一次批量查询
+        for (Map.Entry<Integer, List<Long>> entry : tableIndexToMids.entrySet()) {
+            int tableIndex = entry.getKey();
+            List<Long> tableMids = entry.getValue();
+            
+            try {
+                // MongoDB 使用 _id 存储 mid
+                getMessageCollection(tableIndex)
+                    .find(Filters.in("_id", tableMids))
+                    .projection(fields(
+                        excludeId(),
+                        include("_from", "_data", "_searchable_key", "_dt")
+                    ))
+                    .forEach(doc -> {
+                        Message msg = documentToMessage(doc);
+                        if (msg != null) {
+                            result.add(msg);
+                        }
+                    });
+            } catch (Exception e) {
+                log.error("Failed to batch fetch messages from table {}: {}", tableIndex, e.getMessage());
+            }
+        }
+        
+        return result;
     }
     
     @Override
