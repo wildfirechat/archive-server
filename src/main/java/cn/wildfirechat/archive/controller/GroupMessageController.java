@@ -48,8 +48,12 @@ public class GroupMessageController {
             userId, request.getConvTarget(), request);
         
         // 调用专门的群组消息查询方法（查询 group_message_archive 表）
-        MessageFetchResponse response = messageQueryService.fetchGroupMessages(request);
-        return Result.success(response);
+        try {
+            MessageFetchResponse response = messageQueryService.fetchGroupMessages(userId, request);
+            return Result.success(response);
+        } catch (SecurityException e) {
+            return Result.error(403, e.getMessage());
+        }
     }
     
     /**
@@ -70,7 +74,11 @@ public class GroupMessageController {
             userId, request.getConvTarget(), request.getKeyword());
         
         // 调用专门的群组消息查询方法（查询 group_message_archive 表）
-        MessageFetchResponse response = messageQueryService.searchGroupMessages(request);
-        return Result.success(response);
+        try {
+            MessageFetchResponse response = messageQueryService.searchGroupMessages(userId, request);
+            return Result.success(response);
+        } catch (SecurityException e) {
+            return Result.error(403, e.getMessage());
+        }
     }
 }

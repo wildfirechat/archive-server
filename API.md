@@ -983,7 +983,7 @@ POST /api/group-messages/search
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | keyword | string | **是** | - | 搜索关键字 |
-| convTarget | string | 否 | - | 群组ID（不提供则搜索所有群组） |
+| convTarget | string | **是** | - | 群组ID（必须提供；仅能搜索当前用户所在群组） |
 | convLine | int | 否 | - | 会话线路筛选 |
 | contentType | int | 否 | - | 内容类型筛选 |
 | startMid | long | 否 | - | 起始消息ID |
@@ -1002,14 +1002,8 @@ POST /api/group-messages/search
 }
 ```
 
-**搜索所有群组：**
-
-```json
-{
-  "keyword": "重要通知",
-  "limit": 20
-}
-```
+> 出于权限控制，不再支持不指定群组 ID 的“搜索所有群组”。调用方必须传 `convTarget`，
+> 服务端会通过 IM 接口校验当前用户是否是该群成员，非成员返回 403。
 
 #### 响应参数
 

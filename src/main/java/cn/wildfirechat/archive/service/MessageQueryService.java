@@ -31,15 +31,17 @@ public interface MessageQueryService {
     
     /**
      * 读取群组消息列表（超级群组）
+     * @param userId 当前登录用户ID，用于校验群成员身份
      * @param request 请求参数（convTarget 为群组ID）
      * @return 消息列表响应
      */
-    MessageFetchResponse fetchGroupMessages(FetchRequest request);
+    MessageFetchResponse fetchGroupMessages(String userId, FetchRequest request);
     
     /**
      * 搜索群组消息（超级群组）
-     * @param request 搜索请求参数（keyword 必填，convTarget 可选）
+     * @param userId 当前登录用户ID，用于校验群成员身份
+     * @param request 搜索请求参数（keyword、convTarget 必填）
      * @return 消息列表响应
      */
-    MessageFetchResponse searchGroupMessages(SearchRequest request);
+    MessageFetchResponse searchGroupMessages(String userId, SearchRequest request);
 }

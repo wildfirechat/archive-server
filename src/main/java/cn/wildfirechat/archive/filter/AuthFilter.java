@@ -59,7 +59,7 @@ public class AuthFilter implements Filter {
         // 验证 authCode
         String userId = validateAuthCode(authCode);
         if (userId == null) {
-            log.warn("Invalid authCode: {}", authCode);
+            log.warn("Invalid authCode in request: {}", requestURI);
             writeErrorResponse(httpResponse, 401, "invalid authCode");
             return;
         }
